@@ -1,20 +1,30 @@
-# Python 3.10+ | pip install discord.py requests
-# Botのコマンドとして動く
-# /spam で起動 → モーダル(入力欄)が出る
-
+# Python 3.10+ | pip install discord.py requests flask gunicorn
+import os
+import threading
+import asyncio
+import time
+import requests
+from flask import Flask
 import discord
 from discord.ext import commands
 from discord import app_commands
-import requests
-import threading
-import time
-import os
 
 TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "YOUR_BOT_TOKEN")
 
-intents = discord.Intents.default()
-intents.guilds = True
-bot = commands.Bot(command_prefix="!", intents=intents)
+# ── Flask (ポート開放用) ───────────────────────────────────────────
+flask_app = Flask(__name__)
+
+@flask_app.route("/")
+def index():
+    return "online", 200
+
+@flask_app.route("/ping")
+def ping():
+    return "pong", 200
+
+def run_flask():
+    port = int(os.environ.get("PORT", 5000))
+    flask_app.run(host="0.0.0.0", port=port)
 
 
 # ── 転送スパム本体 ──────────────────────────────────────────────────
@@ -25,11 +35,12 @@ def do_forward_spam(
     dst_guild_id: str,
     count: int,
     delay: float,
-    result_channel: discord.TextChannel,
+    result_channel,
+    loop,
 ):
     headers = {
         "Authorization": user_token,
-        "Content-Type": "application/json",
+        "Content-Type" : "application/json",
     }
 
     # 転送元メッセージ取得
@@ -38,9 +49,9 @@ def do_forward_spam(
         headers=headers, timeout=10,
     )
     if r.status_code != 200:
-        discord.utils.asyncio.run_coroutine_threadsafe(
+        asyncio.run_coroutine_threadsafe(
             result_channel.send(f"❌ メッセージ取得失敗: {r.status_code}"),
-            bot.loop,
+            loop,
         )
         return
 
@@ -52,9 +63,9 @@ def do_forward_spam(
         headers=headers, timeout=10,
     )
     if r2.status_code != 200:
-        discord.utils.asyncio.run_coroutine_threadsafe(
+        asyncio.run_coroutine_threadsafe(
             result_channel.send(f"❌ サーバー取得失敗: {r2.status_code}"),
-            bot.loop,
+            loop,
         )
         return
 
@@ -64,7 +75,6 @@ def do_forward_spam(
     def spam_channel(ch: dict):
         nonlocal success_total
         ch_id   = ch["id"]
-        ch_name = ch.get("name", ch_id)
         for i in range(count):
             try:
                 payload = {
@@ -102,18 +112,21 @@ def do_forward_spam(
     for t in threads:
         t.join()
 
-    # 結果をBotで通知
-    import asyncio
     asyncio.run_coroutine_threadsafe(
         result_channel.send(
             f"✅ 完了 — {success_total}件転送成功\n"
             f"対象チャンネル数: {len(channels)}"
         ),
-        bot.loop,
+        loop,
     )
 
 
-# ── モーダル (入力フォーム) ────────────────────────────────────────
+# ── Discord Bot ────────────────────────────────────────────────────
+intents = discord.Intents.default()
+intents.guilds = True
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+
 class SpamModal(discord.ui.Modal, title="転送スパム設定"):
     user_token = discord.ui.TextInput(
         label="ユーザートークン",
@@ -149,7 +162,6 @@ class SpamModal(discord.ui.Modal, title="転送スパム設定"):
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
 
-        # 回数と間隔をパース
         try:
             parts = self.settings.value.replace(" ", "").split("/")
             count = int(parts[0])
@@ -160,29 +172,22 @@ class SpamModal(discord.ui.Modal, title="転送スパム設定"):
             )
             return
 
-        # トークン検証
         r = requests.get(
             "https://discord.com/api/v10/users/@me",
             headers={"Authorization": self.user_token.value.strip()},
             timeout=10,
         )
         if r.status_code != 200:
-            await interaction.followup.send(
-                "❌ トークンが無効です", ephemeral=True
-            )
+            await interaction.followup.send("❌ トークンが無効です", ephemeral=True)
             return
 
         user = r.json()
         await interaction.followup.send(
-            f"✅ トークン確認: `{user['username']}`\n"
-            f"⏳ スパム開始します...",
+            f"✅ トークン確認: `{user['username']}`\n⏳ スパム開始します...",
             ephemeral=True,
         )
 
-        # 結果通知先チャンネル = コマンドを打ったチャンネル
-        result_ch = interaction.channel
-
-        # 別スレッドでスパム実行
+        loop = asyncio.get_event_loop()
         t = threading.Thread(
             target=do_forward_spam,
             args=(
@@ -192,14 +197,14 @@ class SpamModal(discord.ui.Modal, title="転送スパム設定"):
                 self.dst_guild_id.value.strip(),
                 count,
                 delay,
-                result_ch,
+                interaction.channel,
+                loop,
             ),
             daemon=True,
         )
         t.start()
 
 
-# ── スラッシュコマンド ─────────────────────────────────────────────
 @bot.tree.command(name="spam", description="転送スパムを実行します")
 @app_commands.checks.has_permissions(administrator=True)
 async def spam_command(interaction: discord.Interaction):
@@ -212,5 +217,10 @@ async def on_ready():
     await bot.tree.sync()
     print("コマンド同期完了")
 
+
+# ── 起動 ───────────────────────────────────────────────────────────
+# Flaskを別スレッドで起動
+flask_thread = threading.Thread(target=run_flask, daemon=True)
+flask_thread.start()
 
 bot.run(TOKEN)
