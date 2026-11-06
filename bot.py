@@ -3,6 +3,7 @@ import os
 import threading
 import asyncio
 import time
+import random
 import requests
 from flask import Flask
 import discord
@@ -11,7 +12,7 @@ from discord import app_commands
 
 TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "YOUR_BOT_TOKEN")
 
-# ── Bot定義を最初に ────────────────────────────────────────────────
+# ── Bot定義 ────────────────────────────────────────────────────────
 intents = discord.Intents.default()
 intents.guilds = True
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -31,24 +32,50 @@ def run_flask():
     port = int(os.environ.get("PORT", 5000))
     flask_app.run(host="0.0.0.0", port=port)
 
-
 # ── ヘッダー生成 ───────────────────────────────────────────────────
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
+]
+
 def make_headers(token: str) -> dict:
     return {
-        "Authorization": token,
-        "Content-Type" : "application/json",
-        "User-Agent"   : (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
-        "X-Super-Properties": "eyJvcyI6IldpbmRvd3MiLCJicm93c2VyIjoiQ2hyb21lIn0=",
+        "Authorization"     : token,
+        "Content-Type"      : "application/json",
+        "User-Agent"        : random.choice(USER_AGENTS),
+        "X-Super-Properties": "eyJvcyI6IldpbmRvd3MiLCJicm93c2VyIjoiQ2hyb21lIiwiZGV2aWNlIjoiIiwic3lzdGVtX2xvY2FsZSI6ImphIiwiYnJvd3Nlcl91c2VyX2FnZW50IjoiTW96aWxsYS81LjAgKFdpbmRvd3MgTlQgMTAuMDsgV2luNjQ7IHg2NCkgQXBwbGVXZWJLaXQvNTM3LjM2IChLSFRNTCwgbGlrZSBHZWNrbykgQ2hyb21lLzEyMC4wLjAuMCBTYWZhcmkvNTM3LjM2IiwiYnJvd3Nlcl92ZXJzaW9uIjoiMTIwLjAuMC4wIiwib3NfdmVyc2lvbiI6IjEwIiwicmVmZXJyZXIiOiIiLCJyZWZlcnJpbmdfZG9tYWluIjoiIiwicmVmZXJyZXJfY3VycmVudCI6IiIsInJlZmVycmluZ19kb21haW5fY3VycmVudCI6IiIsInJlbGVhc2VfY2hhbm5lbCI6InN0YWJsZSIsImNsaWVudF9idWlsZF9udW1iZXIiOjI3MDQwNiwiY2xpZW50X2V2ZW50X3NvdXJjZSI6bnVsbH0=",
+        "X-Discord-Locale"  : "ja",
+        "Origin"            : "https://discord.com",
+        "Referer"           : "https://discord.com/channels/@me",
     }
 
+# ── トークン検証 ───────────────────────────────────────────────────
+def validate_token(token: str) -> dict | None:
+    r = requests.get(
+        "https://discord.com/api/v10/users/@me",
+        headers=make_headers(token),
+        timeout=10,
+    )
+    return r.json() if r.status_code == 200 else None
+
+# ── メッセージ取得 ─────────────────────────────────────────────────
+def get_message(token: str, channel_id: str, message_id: str) -> dict | None:
+    headers = make_headers(token)
+    for api_ver in ["v10", "v9"]:
+        r = requests.get(
+            f"https://discord.com/api/{api_ver}/channels/{channel_id}/messages/{message_id}",
+            headers=headers,
+            timeout=10,
+        )
+        if r.status_code == 200:
+            return r.json()
+    return None
 
 # ── 転送スパム本体 ──────────────────────────────────────────────────
 def do_forward_spam(
-    user_token: str,
+    tokens: list[str],
     src_channel_id: str,
     src_message_id: str,
     dst_guild_id: str,
@@ -57,53 +84,57 @@ def do_forward_spam(
     result_channel,
     loop,
 ):
-    headers = make_headers(user_token)
+    # 有効なトークンだけ残す
+    valid_tokens = []
+    for t in tokens:
+        u = validate_token(t)
+        if u:
+            valid_tokens.append(t)
+            asyncio.run_coroutine_threadsafe(
+                result_channel.send(f"✅ トークン有効: `{u['username']}`"),
+                loop,
+            )
+        else:
+            asyncio.run_coroutine_threadsafe(
+                result_channel.send(f"❌ トークン無効: `{t[:20]}...`"),
+                loop,
+            )
 
-    # 転送元メッセージ取得
-    r = requests.get(
-        f"https://discord.com/api/v10/channels/{src_channel_id}/messages/{src_message_id}",
-        headers=headers,
-        timeout=10,
-    )
-
-    if r.status_code != 200:
-        r = requests.get(
-            f"https://discord.com/api/v9/channels/{src_channel_id}/messages/{src_message_id}",
-            headers=headers,
-            timeout=10,
+    if not valid_tokens:
+        asyncio.run_coroutine_threadsafe(
+            result_channel.send("❌ 有効なトークンがありません"),
+            loop,
         )
+        return
 
-    if r.status_code != 200:
+    # メッセージ取得 (有効トークンの最初のもので取得)
+    msg_data = get_message(valid_tokens[0], src_channel_id, src_message_id)
+    if not msg_data:
         asyncio.run_coroutine_threadsafe(
             result_channel.send(
-                f"❌ メッセージ取得失敗: {r.status_code}\n"
-                f"チャンネルIDとメッセージIDを確認してください"
+                "❌ メッセージ取得失敗\n"
+                "・チャンネルIDとメッセージIDを確認\n"
+                "・そのチャンネルにアクセス権があるか確認"
             ),
             loop,
         )
         return
 
-    msg_content = r.json().get("content", "")
-    if not msg_content:
-        msg_content = "[転送メッセージ]"
-
+    msg_content = msg_data.get("content", "") or "[添付ファイル/埋め込み]"
     asyncio.run_coroutine_threadsafe(
-        result_channel.send(f"📨 転送元メッセージ取得成功: `{msg_content[:50]}`"),
+        result_channel.send(f"📨 メッセージ取得成功: `{msg_content[:80]}`"),
         loop,
     )
 
     # 転送先チャンネル取得
     r2 = requests.get(
         f"https://discord.com/api/v10/guilds/{dst_guild_id}/channels",
-        headers=headers,
+        headers=make_headers(valid_tokens[0]),
         timeout=10,
     )
     if r2.status_code != 200:
         asyncio.run_coroutine_threadsafe(
-            result_channel.send(
-                f"❌ サーバー取得失敗: {r2.status_code}\n"
-                f"サーバーIDを確認してください"
-            ),
+            result_channel.send(f"❌ サーバー取得失敗: {r2.status_code}"),
             loop,
         )
         return
@@ -117,19 +148,36 @@ def do_forward_spam(
         return
 
     asyncio.run_coroutine_threadsafe(
-        result_channel.send(f"🎯 転送先チャンネル数: {len(channels)}個"),
+        result_channel.send(
+            f"🎯 転送先チャンネル数: {len(channels)}個\n"
+            f"🔑 使用トークン数: {len(valid_tokens)}個\n"
+            f"⏳ スパム開始..."
+        ),
         loop,
     )
 
     success_total = 0
     lock = threading.Lock()
+    token_index = 0
+    token_lock  = threading.Lock()
+
+    def next_token() -> str:
+        nonlocal token_index
+        with token_lock:
+            t = valid_tokens[token_index % len(valid_tokens)]
+            token_index += 1
+            return t
 
     def spam_channel(ch: dict):
         nonlocal success_total
-        ch_id   = ch["id"]
+        ch_id = ch["id"]
 
         for i in range(count):
+            token   = next_token()
+            headers = make_headers(token)
+
             try:
+                # 転送として送信
                 payload = {
                     "content": msg_content,
                     "message_reference": {
@@ -146,6 +194,7 @@ def do_forward_spam(
                     timeout=10,
                 )
 
+                # 転送失敗なら通常送信
                 if resp.status_code not in (200, 201):
                     payload2 = {"content": msg_content}
                     resp = requests.post(
@@ -163,18 +212,17 @@ def do_forward_spam(
                     time.sleep(float(retry))
                     continue
                 elif resp.status_code == 403:
+                    # 権限なしはスキップ
                     return
                 elif resp.status_code == 401:
-                    asyncio.run_coroutine_threadsafe(
-                        result_channel.send("❌ トークンが無効または期限切れ"),
-                        loop,
-                    )
-                    return
+                    # トークン無効は次のトークンへ
+                    continue
 
             except Exception as e:
                 print(f"エラー: {e}")
 
-            time.sleep(delay)
+            # ランダムディレイでレート制限回避
+            time.sleep(delay + random.uniform(0, 0.2))
 
     threads = []
     for ch in channels:
@@ -188,7 +236,8 @@ def do_forward_spam(
         result_channel.send(
             f"✅ 完了\n"
             f"転送成功: {success_total}件\n"
-            f"対象チャンネル: {len(channels)}個"
+            f"対象チャンネル: {len(channels)}個\n"
+            f"使用トークン: {len(valid_tokens)}個"
         ),
         loop,
     )
@@ -196,10 +245,10 @@ def do_forward_spam(
 
 # ── モーダル ───────────────────────────────────────────────────────
 class SpamModal(discord.ui.Modal, title="転送スパム設定"):
-    user_token = discord.ui.TextInput(
-        label="ユーザートークン",
-        placeholder="あなたのDiscordトークンを入力",
-        style=discord.TextStyle.short,
+    user_tokens = discord.ui.TextInput(
+        label="ユーザートークン (改行で複数指定可)",
+        placeholder="トークン1\nトークン2\nトークン3",
+        style=discord.TextStyle.paragraph,
         required=True,
     )
     src_channel_id = discord.ui.TextInput(
@@ -230,6 +279,20 @@ class SpamModal(discord.ui.Modal, title="転送スパム設定"):
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
 
+        # トークンを改行で分割
+        tokens = [
+            t.strip()
+            for t in self.user_tokens.value.strip().splitlines()
+            if t.strip()
+        ]
+
+        if not tokens:
+            await interaction.followup.send(
+                "❌ トークンを入力してください",
+                ephemeral=True,
+            )
+            return
+
         try:
             parts = self.settings.value.replace(" ", "").split("/")
             count = int(parts[0])
@@ -241,21 +304,8 @@ class SpamModal(discord.ui.Modal, title="転送スパム設定"):
             )
             return
 
-        r = requests.get(
-            "https://discord.com/api/v10/users/@me",
-            headers=make_headers(self.user_token.value.strip()),
-            timeout=10,
-        )
-        if r.status_code != 200:
-            await interaction.followup.send(
-                "❌ トークンが無効です",
-                ephemeral=True,
-            )
-            return
-
-        user = r.json()
         await interaction.followup.send(
-            f"✅ トークン確認: `{user['username']}`\n⏳ スパム開始します...",
+            f"🔍 {len(tokens)}個のトークンを検証中...",
             ephemeral=True,
         )
 
@@ -263,7 +313,7 @@ class SpamModal(discord.ui.Modal, title="転送スパム設定"):
         t = threading.Thread(
             target=do_forward_spam,
             args=(
-                self.user_token.value.strip(),
+                tokens,
                 self.src_channel_id.value.strip(),
                 self.src_message_id.value.strip(),
                 self.dst_guild_id.value.strip(),
