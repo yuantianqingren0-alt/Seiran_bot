@@ -11,6 +11,11 @@ from discord import app_commands
 
 TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "YOUR_BOT_TOKEN")
 
+# ── Bot定義を最初に ────────────────────────────────────────────────
+intents = discord.Intents.default()
+intents.guilds = True
+bot = commands.Bot(command_prefix="!", intents=intents)
+
 # ── Flask ──────────────────────────────────────────────────────────
 flask_app = Flask(__name__)
 
@@ -62,7 +67,6 @@ def do_forward_spam(
     )
 
     if r.status_code != 200:
-        # v9でも試す
         r = requests.get(
             f"https://discord.com/api/v9/channels/{src_channel_id}/messages/{src_message_id}",
             headers=headers,
@@ -81,7 +85,6 @@ def do_forward_spam(
 
     msg_content = r.json().get("content", "")
     if not msg_content:
-        # 添付ファイルや埋め込みの場合テキストが空の可能性
         msg_content = "[転送メッセージ]"
 
     asyncio.run_coroutine_threadsafe(
@@ -124,11 +127,9 @@ def do_forward_spam(
     def spam_channel(ch: dict):
         nonlocal success_total
         ch_id   = ch["id"]
-        ch_name = ch.get("name", ch_id)
 
         for i in range(count):
             try:
-                # 転送として送信
                 payload = {
                     "content": msg_content,
                     "message_reference": {
@@ -145,7 +146,6 @@ def do_forward_spam(
                     timeout=10,
                 )
 
-                # 転送が失敗したら通常送信にフォールバック
                 if resp.status_code not in (200, 201):
                     payload2 = {"content": msg_content}
                     resp = requests.post(
@@ -176,7 +176,6 @@ def do_forward_spam(
 
             time.sleep(delay)
 
-    # 全チャンネル同時スパム
     threads = []
     for ch in channels:
         t = threading.Thread(target=spam_channel, args=(ch,), daemon=True)
@@ -242,7 +241,6 @@ class SpamModal(discord.ui.Modal, title="転送スパム設定"):
             )
             return
 
-        # トークン検証
         r = requests.get(
             "https://discord.com/api/v10/users/@me",
             headers=make_headers(self.user_token.value.strip()),
@@ -294,10 +292,6 @@ async def on_ready():
 
 
 # ── 起動 ───────────────────────────────────────────────────────────
-intents = discord.Intents.default()
-intents.guilds = True
-bot = commands.Bot(command_prefix="!", intents=intents)
-
 flask_thread = threading.Thread(target=run_flask, daemon=True)
 flask_thread.start()
 
